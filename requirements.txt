@@ -1,11 +1,11 @@
 streamlit
 langchain
-langchain-google-genai
 langchain-community
+langchain-core
+langchain-text-splitters
+langchain-google-genai
+google-generativeai
 faiss-cpu
 PyPDF2
-python-dotenv
 pillow
-google-generativeai
-openai
-tiktoken
+python-dotenv
