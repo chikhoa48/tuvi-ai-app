@@ -3,7 +3,9 @@ langchain
 langchain-google-genai
 langchain-community
 faiss-cpu
-pypdf
+PyPDF2
 python-dotenv
 pillow
 google-generativeai
+openai
+tiktoken
