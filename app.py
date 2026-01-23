@@ -1,330 +1,241 @@
 import streamlit as st
+import os
+import time
 import google.generativeai as genai
-from lunardate import LunarDate
-from datetime import datetime
-import pandas as pd
+from PyPDF2 import PdfReader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
+from PIL import Image
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Huyền Cơ Các - Tử Vi Pro", page_icon="☯️", layout="wide")
+st.set_page_config(page_title="Đại Sư Tử Vi - AI Tổng Hợp", page_icon="⛩️", layout="wide")
 
-# --- CSS CHUYÊN NGHIỆP GIỐNG MẪU ---
 st.markdown("""
 <style>
-    /* Font và màu sắc chung */
-    body { font-family: 'Times New Roman', serif; background-color: #f0f2f6; }
-    
-    /* Lưới 12 cung */
-    .laso-container {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        grid-template-rows: repeat(4, 160px);
-        gap: 2px;
-        background-color: #8b0000; /* Màu viền đỏ đậm */
-        border: 2px solid #8b0000;
-        max-width: 1000px;
-        margin: 0 auto;
+    .main {background-color: #fdfbf7;}
+    h1, h2, h3 {font-family: 'Times New Roman', serif; color: #5a1e1e;}
+    .stChatInput {position: fixed; bottom: 20px;}
+    .report-card {
+        padding: 20px; border-radius: 10px; background-color: white;
+        border-left: 5px solid #8B0000; box-shadow: 2px 2px 10px rgba(0,0,0,0.1);
+        margin-bottom: 20px; font-family: 'Times New Roman', serif; font-size: 1.1em;
     }
-
-    /* Ô từng cung */
-    .cung-box {
-        background-color: white;
-        position: relative;
-        padding: 5px;
-        font-size: 12px;
-        display: flex;
-        flex-direction: column;
-    }
-    
-    /* Header Cung (Tên cung, Đại vận) */
-    .cung-header {
-        display: flex;
-        justify_content: space-between;
-        border-bottom: 1px dashed #ccc;
-        padding-bottom: 2px;
-        margin-bottom: 5px;
-        font-weight: bold;
-        color: #b71c1c;
-        text-transform: uppercase;
-    }
-    
-    /* Chính tinh (To, Đậm) */
-    .chinh-tinh {
-        font-size: 15px;
-        font-weight: bold;
-        text-align: center;
-        margin: 5px 0;
-    }
-    .sao-tot { color: #d81b60; } /* Màu hồng/đỏ cho sao tốt */
-    .sao-xau { color: #212121; } /* Màu đen cho sao xấu/sát tinh */
-    
-    /* Phụ tinh (Chia 2 cột: Trái tốt, Phải xấu) */
-    .phu-tinh-container {
-        display: flex;
-        flex-grow: 1;
-        font-size: 11px;
-    }
-    .phu-tinh-left { width: 50%; text-align: left; color: #2e7d32; } /* Xanh lá */
-    .phu-tinh-right { width: 50%; text-align: right; color: #424242; }
-    
-    /* Footer Cung (Tên Chi, Vị trí) */
-    .cung-footer {
-        text-align: center;
-        font-weight: bold;
-        background-color: #eceff1;
-        margin-top: auto;
-        font-size: 13px;
-        padding: 2px;
-    }
-
-    /* Ô Thiên Bàn (Ở giữa) */
-    .center-info {
-        grid-column: 2 / 4;
-        grid-row: 2 / 4;
-        background-color: #fff8e1; /* Màu vàng nhạt */
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        text-align: center;
-        padding: 20px;
-    }
-    .center-title { font-size: 24px; font-weight: bold; color: #b71c1c; margin-bottom: 10px; }
-    .bazi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; width: 100%; margin-top: 10px; }
-    .bazi-col { background: white; padding: 5px; border: 1px solid #ddd; border-radius: 5px; }
-    
-    /* Tuần / Triệt */
-    .tuan-triet {
-        position: absolute;
-        bottom: 25px;
-        background: #000;
-        color: #fff;
-        padding: 1px 4px;
-        font-size: 10px;
-        border-radius: 3px;
+    .reasoning-box {
+        font-size: 0.9em; color: #666; font-style: italic; 
+        background-color: #f0f0f0; padding: 10px; border-radius: 5px; margin-bottom: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- KHỞI TẠO STATE ---
-if "chat_history" not in st.session_state: st.session_state.chat_history = []
-if "user_data_context" not in st.session_state: st.session_state.user_data_context = ""
-if "html_laso" not in st.session_state: st.session_state.html_laso = ""
+# --- 1. HÀM TỰ ĐỘNG LẤY MODEL MỚI NHẤT ---
+def get_available_gemini_models(api_key):
+    """Quét API Google để lấy danh sách model thực tế đang khả dụng"""
+    if not api_key:
+        return ["Chưa nhập API Key"]
+    
+    try:
+        genai.configure(api_key=api_key)
+        models = []
+        for m in genai.list_models():
+            # Lọc lấy các model có khả năng tạo nội dung (generateContent)
+            if 'generateContent' in m.supported_generation_methods:
+                # Ưu tiên các model Gemini
+                if "gemini" in m.name:
+                    models.append(m.name.replace("models/", ""))
+        
+        # Sắp xếp để model pro/mới nhất lên đầu (tùy logic)
+        models.sort(reverse=True)
+        return models
+    except Exception as e:
+        return [f"Lỗi: {str(e)}"]
 
-# --- LOGIC AN SAO (RÚT GỌN - CORE ENGINE) ---
-# Đây là phần logic Python để tính vị trí sao, thay vì đoán mò bằng AI
-CHI = ["Tý", "Sửu", "Dần", "Mão", "Thìn", "Tỵ", "Ngọ", "Mùi", "Thân", "Dậu", "Tuất", "Hợi"]
-CAN = ["Giáp", "Ất", "Bính", "Đinh", "Mậu", "Kỷ", "Canh", "Tân", "Nhâm", "Quý"]
-NGU_HANH_NAP_AM = { # Giản lược để demo
-    "Giáp Tý": "Hải Trung Kim", "Ất Sửu": "Hải Trung Kim", "Bính Dần": "Lư Trung Hỏa", "Đinh Mão": "Lư Trung Hỏa",
-    # ... (Cần thêm đủ 60 hoa giáp nếu muốn chính xác 100%, ở đây demo)
-}
+# --- 2. XỬ LÝ SÁCH (RAG) ---
+@st.cache_resource
+def get_vector_store(_text_chunks, api_key):
+    # Dùng hàm cache để không phải load lại khi đổi model
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=api_key)
+    vectorstore = FAISS.from_texts(texts=_text_chunks, embedding=embeddings)
+    return vectorstore
 
-def get_can_chi_nam(year):
-    return CAN[(year + 6) % 10], CHI[(year + 8) % 12]
+def process_pdfs(pdf_docs):
+    text = ""
+    for pdf in pdf_docs:
+        pdf_reader = PdfReader(pdf)
+        for page in pdf_reader.pages:
+            t = page.extract_text()
+            if t: text += t
+    
+    # Chia nhỏ văn bản để tra cứu chi tiết
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=300)
+    return text_splitter.split_text(text)
 
-def tim_cung_menh(thang_am, gio_chi_idx):
-    # Khởi tại Dần (index 2)
-    # Tháng 1 tại Dần, thuận đến tháng sinh, nghịch về giờ sinh
-    pos = (2 + (thang_am - 1) - gio_chi_idx) % 12
-    return pos # Trả về index 0-11 (0=Tý)
+# --- 3. VISION & DATA EXTRACTION ---
+def extract_chart_data(image, model_name, api_key):
+    llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=api_key, temperature=0)
+    msg = HumanMessage(content=[
+        {"type": "text", "text": "Bạn là chuyên gia số hóa. Hãy nhìn ảnh lá số tử vi này và trích xuất lại TOÀN BỘ thông tin: Ngày giờ sinh, Âm dương nam/nữ, Cục, Mệnh, Thân, vị trí 12 cung và các sao trong từng cung. Trả về dạng văn bản có cấu trúc rõ ràng."},
+        {"type": "image_url", "image_url": image}
+    ])
+    res = llm.invoke([msg])
+    return res.content
 
-def tim_cuc(can_nam_idx, cung_menh_idx):
-    # Logic tìm Cục (Thủy Nhị, Mộc Tam...)
-    # Đây là logic phức tạp, demo mặc định Mộc Tam Cục để code chạy
-    return 3 # 3 = Mộc Tam Cục
+# --- 4. LOGIC ĐẠI SƯ (REASONING CHAIN) ---
+def get_master_response(query, chart_data, vector_store, model_name, api_key, history):
+    
+    llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=api_key, temperature=0.5)
 
-def an_chinh_tinh(ngay_am, cuc):
-    # Logic An Tử Vi theo Ngày và Cục (Rất phức tạp, giản lược)
-    # Giả sử Tử Vi tại Ngọ (6) cho demo
-    tu_vi_pos = (cuc - ngay_am) % 12 
-    # Nếu làm thật cần bảng tra Cục/Ngày
-    tu_vi_pos = 6 # Mặc định demo: Tử Vi tại Ngọ
+    # Prompt Quy nạp & Tổng hợp kiến thức
+    system_prompt = """
+    Bạn là "Bạch Vân Cư Sĩ" - một bậc thầy Tử Vi Đẩu Số, người kết hợp tinh hoa của nhiều trường phái.
     
-    # An các sao khác theo Tử Vi
-    thien_phu_pos = (12 - tu_vi_pos) % 12 # Thiên Phủ đối xứng qua trục Dần Thân
+    NHIỆM VỤ CỦA BẠN:
+    Luận giải câu hỏi của người dùng dựa trên:
+    1. Thông tin lá số (được cung cấp bên dưới).
+    2. Kiến thức từ các sách tử vi (được cung cấp trong phần Context).
     
-    stars = {i: [] for i in range(12)}
+    QUY TRÌNH SUY LUẬN (BẮT BUỘC):
+    Bước 1 - Đối chiếu: Tìm kiếm xem các cuốn sách khác nhau nói gì về vấn đề này (Ví dụ: Sách A nói sao này tốt, nhưng sách B nói xấu khi gặp sao kia).
+    Bước 2 - Phân tích Cục diện: Xem xét ngũ hành, âm dương, vị trí đắc hãm để xem ý kiến nào trong sách là phù hợp nhất với lá số này.
+    Bước 3 - Tổng hợp (Quy nạp): Đừng chỉ trích dẫn. Hãy kết hợp các ý kiến để đưa ra lời luận đoán cuối cùng của riêng bạn.
     
-    # Vòng Tử Vi: Tử Vi, Liêm Trinh, Thiên Đồng, Vũ Khúc, Thái Dương, Thiên Cơ
-    stars[tu_vi_pos].append("Tử Vi")
-    stars[(tu_vi_pos - 3) % 12].append("Liêm Trinh")
-    stars[(tu_vi_pos - 4) % 12].append("Thiên Đồng")
-    stars[(tu_vi_pos - 5) % 12].append("Vũ Khúc")
-    stars[(tu_vi_pos - 6) % 12].append("Thái Dương")
-    stars[(tu_vi_pos - 8) % 12].append("Thiên Cơ")
-    
-    # Vòng Thiên Phủ: Thiên Phủ, Thái Âm, Tham Lang, Cự Môn, Thiên Tướng, Thiên Lương, Thất Sát, Phá Quân
-    stars[thien_phu_pos].append("Thiên Phủ")
-    stars[(thien_phu_pos + 1) % 12].append("Thái Âm")
-    stars[(thien_phu_pos + 2) % 12].append("Tham Lang")
-    stars[(thien_phu_pos + 3) % 12].append("Cự Môn")
-    stars[(thien_phu_pos + 4) % 12].append("Thiên Tướng")
-    stars[(thien_phu_pos + 5) % 12].append("Thiên Lương")
-    stars[(thien_phu_pos + 6) % 12].append("Thất Sát")
-    stars[(thien_phu_pos + 10) % 12].append("Phá Quân")
-    
-    return stars
+    PHONG CÁCH:
+    - Lời văn thâm trầm, sâu sắc, có tính triết lý.
+    - Luôn giải thích lý do: "Sách Tử Vi Hàm Số cho rằng..., tuy nhiên trong trường hợp này Mệnh bạn có Tuần Không nên..."
+    - Tránh máy móc. Nếu sách không có thông tin, hãy dùng kiến thức nền tảng của bạn để suy luận.
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.header("⚙️ Cấu hình")
+    Thông tin lá số của đương số:
+    {chart_data}
+
+    Kiến thức tham khảo từ sách (Context):
+    {context}
+    """
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{input}")
+    ])
+
+    chain = create_stuff_documents_chain(llm, prompt)
+    retriever = vector_store.as_retriever(search_kwargs={"k": 7}) # Lấy nhiều đoạn văn bản hơn để tổng hợp
+    rag_chain = create_retrieval_chain(retriever, chain)
+
+    response = rag_chain.invoke({
+        "input": query,
+        "chart_data": chart_data,
+        "chat_history": history
+    })
     
-    if "GEMINI_API_KEY" in st.secrets:
-        st.success("✅ API Key đã kết nối")
-        api_key = st.secrets["GEMINI_API_KEY"]
-    else:
-        api_key = st.text_input("Nhập API Key", type="password")
-    
-    st.divider()
-    
-    # Cập nhật danh sách Model mới nhất
-    model_option = st.selectbox(
-        "Chọn Phiên Bản AI:",
-        ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-latest", "gemini-1.5-pro-latest"],
-        help="Chọn 'flash' nếu muốn nhanh, 'pro' nếu muốn luận giải sâu."
-    )
+    return response["answer"]
 
 # --- GIAO DIỆN CHÍNH ---
-st.title("☯️ HUYỀN CƠ CÁC - TỬ VI & BÁT TỰ")
+def main():
+    st.title("⛩️ THIÊN CƠ CÁC - V3")
+    st.caption("Phiên bản Đại Sư AI: Tự động cập nhật Model & Tư duy quy nạp đa nguồn sách")
 
-c1, c2, c3 = st.columns(3)
-with c1: name = st.text_input("Họ tên", "Nguyễn Văn A")
-with c2: 
-    dob = st.date_input("Ngày sinh", datetime(1995, 6, 15))
-    gender = st.selectbox("Giới tính", ["Nam", "Nữ"])
-with c3: 
-    tob = st.time_input("Giờ sinh", datetime.strptime("09:30", "%H:%M").time())
+    # --- SIDEBAR ---
+    with st.sidebar:
+        st.header("🔑 Chìa khóa & Tàng thư")
+        api_key = st.text_input("Nhập Google AI Key", type="password")
+        
+        # --- AUTO UPDATE MODEL SELECTOR ---
+        if api_key:
+            st.success("Đã kết nối Google AI!")
+            available_models = get_available_gemini_models(api_key)
+            selected_model = st.selectbox("Chọn 'Linh Hồn' (Model) cho Đại Sư:", available_models, index=0)
+            if "gemini-1.5-pro" in selected_model or "gemini-2" in selected_model:
+                st.info("💡 Model này có khả năng suy luận mạnh mẽ nhất.")
+        else:
+            selected_model = "gemini-1.5-pro" # Default ảo
+            st.warning("Vui lòng nhập API Key để tải danh sách Model mới nhất.")
 
-def generate_laso_html(user_data):
-    # 1. Tính toán cơ bản
-    lunar = LunarDate.fromSolarDate(user_data['year'], user_data['month'], user_data['day'])
-    can_nam, chi_nam = get_can_chi_nam(lunar.year)
-    can_ngay = "Giáp" # Demo, cần thư viện tính Can Ngày chuẩn
-    chi_ngay = CHI[(lunar.day + 2) % 12] # Demo
-    
-    # 2. An Sao (Gọi hàm logic)
-    gio_chi_idx = (user_data['hour'] + 1) // 2 % 12
-    menh_idx = tim_cung_menh(lunar.month, gio_chi_idx)
-    than_idx = (2 + (lunar.month - 1) + gio_chi_idx) % 12 # Cung Thân
-    
-    star_map = an_chinh_tinh(lunar.day, 3) # Mặc định cục 3 demo
-    
-    # 3. Tạo HTML Grid
-    html = '<div class="laso-container">'
-    
-    # Thứ tự vẽ grid: Tỵ(5)->Ngọ(6)->Mùi(7)->Thân(8)->Thìn(4)->CENTER->Dậu(9)->Mão(3)->CENTER->Tuất(10)->Dần(2)->Sửu(1)->Tý(0)->Hợi(11)
-    # Mapping grid CSS order to Chi Index
-    grid_order = [5, 6, 7, 8, 4, -1, -1, 9, 3, -1, -1, 10, 2, 1, 0, 11]
-    
-    cung_names_han = ["Mệnh", "Phụ Mẫu", "Phúc Đức", "Điền Trạch", "Quan Lộc", "Nô Bộc", "Thiên Di", "Tật Ách", "Tài Bạch", "Tử Tức", "Phu Thê", "Huynh Đệ"]
-    
-    # Xác định cung Mệnh ở đâu để an tên các cung còn lại
-    cung_labels = {}
-    for i in range(12):
-        label_idx = (i - menh_idx) % 12
-        cung_labels[i] = cung_names_han[label_idx]
-        if i == than_idx: cung_labels[i] += " (Thân)"
+        st.divider()
+        st.subheader("📚 Nạp Kiến Thức (Sách)")
+        pdf_docs = st.file_uploader("Upload sách (.pdf)", accept_multiple_files=True)
+        
+        if st.button("Luyện Hóa Kiến Thức"):
+            if not pdf_docs or not api_key:
+                st.error("Thiếu nguyên liệu!")
+            else:
+                with st.spinner("Đang đọc và đối chiếu các sách..."):
+                    chunks = process_pdfs(pdf_docs)
+                    st.session_state.vector_store = get_vector_store(chunks, api_key)
+                    st.success(f"Đã hấp thụ {len(chunks)} đơn vị kiến thức!")
 
-    for idx in grid_order:
-        if idx == -1: # Ô Center (Chỉ render 1 lần ở vị trí đầu tiên gặp)
-            if "center_rendered" not in locals():
-                html += f'''
-                <div class="center-info">
-                    <div class="center-title">NAM MỆNH: {user_data['name'].upper()}</div>
-                    <div>Dương lịch: {user_data['day']}/{user_data['month']}/{user_data['year']} - {user_data['time']}</div>
-                    <div>Âm lịch: {lunar.day}/{lunar.month}/{lunar.year} ({can_nam} {chi_nam})</div>
-                    <div style="margin-top:10px; font-weight:bold; color:#d81b60">Bát Tự (Tứ Trụ)</div>
-                    <div class="bazi-grid">
-                        <div class="bazi-col"><div>Năm</div><b>{can_nam} {chi_nam}</b></div>
-                        <div class="bazi-col"><div>Tháng</div><b>{lunar.month}</b></div>
-                        <div class="bazi-col"><div>Ngày</div><b>{can_ngay} {chi_ngay}</b></div>
-                        <div class="bazi-col"><div>Giờ</div><b>{CHI[gio_chi_idx]}</b></div>
-                    </div>
-                </div>
-                '''
-                locals()["center_rendered"] = True
-            continue
-
-        # Render Cung Box
-        stars_in_cung = star_map.get(idx, [])
-        chinh_tinh_html = "".join([f'<div class="chinh-tinh sao-tot">{s} (M)</div>' for s in stars_in_cung])
-        if not chinh_tinh_html: chinh_tinh_html = '<div class="chinh-tinh" style="color:#ddd; font-weight:normal">Vô Chính Diệu</div>'
-        
-        # Thêm phụ tinh demo
-        phu_tinh_left = "Văn Xương<br>Hóa Khoa" if idx % 2 == 0 else ""
-        phu_tinh_right = "Đà La<br>Hóa Kỵ" if idx % 3 == 0 else ""
-        
-        cung_name = cung_labels.get(idx, "")
-        
-        html += f'''
-        <div class="cung-box">
-            <div class="cung-header">
-                <span>{cung_name}</span>
-                <span>{idx*10 + 2}-{idx*10+11}</span>
-            </div>
-            
-            {chinh_tinh_html}
-            
-            <div class="phu-tinh-container">
-                <div class="phu-tinh-left">{phu_tinh_left}</div>
-                <div class="phu-tinh-right">{phu_tinh_right}</div>
-            </div>
-            
-            <div class="cung-footer">
-                {CHI[idx]}
-            </div>
-        </div>
-        '''
+    # --- MAIN AREA ---
     
-    html += '</div>'
-    return html, f"{can_nam} {chi_nam}"
+    # 1. Upload & Phân tích ảnh (Chỉ làm 1 lần)
+    if "chart_data" not in st.session_state:
+        st.session_state.chart_data = None
 
-if st.button("🔮 Lập Lá Số & Luận Giải", type="primary"):
-    if not api_key:
-        st.error("⛔ Chưa nhập API Key!")
-        st.stop()
-        
-    with st.spinner("Đang an sao và kết nối thiên cơ..."):
-        # 1. Tạo HTML Lá số (Chạy bằng Python Logic)
-        user_data = {
-            "name": name, "day": dob.day, "month": dob.month, "year": dob.year, 
-            "hour": tob.hour, "time": tob.strftime("%H:%M")
-        }
-        html_output, nam_can_chi = generate_laso_html(user_data)
-        st.session_state.html_laso = html_output
-        
-        # 2. Gửi thông tin cho AI luận giải
-        prompt = f"""
-        Bạn là Đại Sư Tử Vi. Hãy luận giải cho người có thông tin:
-        - Tên: {name}, Giới tính: {gender}
-        - Ngày sinh: {dob.strftime('%d/%m/%Y')} Giờ: {tob.strftime('%H:%M')}
-        - Năm Âm Lịch: {nam_can_chi}
-        
-        Hãy đóng vai chuyên gia, viết lời bình giải chi tiết về:
-        1. Mệnh, Thân (Tính cách, ưu nhược điểm).
-        2. Quan Lộc & Tài Bạch (Sự nghiệp, tiền tài).
-        3. Tình duyên (Phu Thê).
-        4. Vận hạn năm nay ({datetime.now().year}).
-        
-        Dùng định dạng Markdown đẹp.
-        """
-        
-        try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(model_option) # Sử dụng model người dùng chọn
-            response = model.generate_content(prompt)
-            st.session_state.result = response.text
-            st.session_state.has_run = True
-        except Exception as e:
-            st.error(f"Lỗi AI: {str(e)}\n\nHãy thử đổi sang model 'gemini-1.5-flash' hoặc kiểm tra lại API Key.")
-
-# --- HIỂN THỊ KẾT QUẢ ---
-if "has_run" in st.session_state and st.session_state.has_run:
-    tab1, tab2 = st.tabs(["📜 Lá Số Tử Vi (Đồ Họa)", "🔮 Luận Giải Chi Tiết"])
+    uploaded_img = st.file_uploader("Bước 1: Tải ảnh lá số lên để Đại sư xem qua", type=['png', 'jpg', 'jpeg'])
     
-    with tab1:
-        st.markdown(st.session_state.html_laso, unsafe_allow_html=True)
-        st.caption("Ghi chú: Lá số được lập trình mô phỏng theo trường phái Nam Phái. Vị trí chính tinh là chính xác theo ngày/cục.")
+    if uploaded_img and not st.session_state.chart_data:
+        if st.button("Trích xuất thông tin lá số"):
+            if not api_key: st.error("Cần API Key."); return
+            with st.spinner("Đang quan sát tinh bàn..."):
+                st.image(uploaded_img, width=300)
+                # Dùng model vision đọc ảnh
+                data = extract_chart_data(uploaded_img, selected_model, api_key)
+                st.session_state.chart_data = data
+                st.success("Đã nắm rõ cách cục lá số!")
+                with st.expander("Xem thông tin thô (Debug)"):
+                    st.write(data)
+
+    # 2. Khu vực Trò chuyện / Luận đoán
+    if st.session_state.chart_data:
+        st.divider()
+        st.subheader("🔮 Đối thoại cùng Đại Sư")
         
-    with tab2:
-        st.markdown(st.session_state.result)
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+
+        # Hiển thị lịch sử chat
+        for msg in st.session_state.messages:
+            role = "user" if isinstance(msg, HumanMessage) else "assistant"
+            with st.chat_message(role):
+                st.markdown(msg.content)
+
+        # Input người dùng
+        user_query = st.chat_input("Hỏi Đại sư (VD: 'Luận cung Tài Bạch của tôi?', 'Năm nay vận hạn ra sao?')")
+        
+        if user_query:
+            if "vector_store" not in st.session_state:
+                st.error("Đại sư chưa được học sách (Chưa upload sách bên trái)!")
+            else:
+                # Hiển thị câu hỏi
+                st.chat_message("user").markdown(user_query)
+                st.session_state.messages.append(HumanMessage(content=user_query))
+                
+                # AI xử lý
+                with st.chat_message("assistant"):
+                    message_placeholder = st.empty()
+                    
+                    # Hiển thị trạng thái "Suy nghĩ"
+                    with st.status("Đang tra cứu và quy nạp kiến thức...", expanded=True) as status:
+                        st.write("🔍 Đang tìm các đoạn liên quan trong sách...")
+                        st.write("⚖️ Đang so sánh các thuyết khác nhau...")
+                        st.write("✍️ Đang tổng hợp lời luận...")
+                        
+                        # Gọi hàm xử lý chính
+                        response_text = get_master_response(
+                            user_query,
+                            st.session_state.chart_data,
+                            st.session_state.vector_store,
+                            selected_model,
+                            api_key,
+                            st.session_state.messages
+                        )
+                        status.update(label="Đã luận giải xong!", state="complete", expanded=False)
+                    
+                    message_placeholder.markdown(response_text)
+                    st.session_state.messages.append(AIMessage(content=response_text))
+
+if __name__ == "__main__":
+    main()
