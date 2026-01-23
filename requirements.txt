@@ -2,8 +2,8 @@ streamlit
 langchain
 langchain-community
 langchain-core
-langchain-text-splitters
 langchain-google-genai
+langchain-text-splitters
 google-generativeai
 faiss-cpu
 PyPDF2
